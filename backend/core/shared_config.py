@@ -124,6 +124,25 @@ TARGET_TOPIC_DURATION_MINUTES = 5  # 话题目标时长（分钟）
 MIN_TOPICS_PER_CHUNK = 3  # 每个文本块最少话题数
 MAX_TOPICS_PER_CHUNK = 8  # 每个文本块最多话题数
 
+# 智能竖屏重构（Auto-Reframe）配置
+VERTICAL_WIDTH = 1080            # 竖屏输出宽度
+VERTICAL_HEIGHT = 1920           # 竖屏输出高度（9:16）
+SQUARE_SIZE = 1080               # 1:1 输出边长
+FACE_SAMPLE_INTERVAL = 0.5       # 人脸检测关键帧采样间隔（秒）
+SMOOTH_WINDOW = 5                # 中心点时间平滑滑动窗口大小（采样点数）
+MAX_CENTER_SHIFT_RATIO = 0.08    # 相邻采样点中心 x 最大位移占源宽比例（限速防抖）
+REFRAME_FACE_MIN_CONFIDENCE = 0.6  # 人脸检测最低置信度，低于则视为检测失败
+REFRAME_MIN_TRACK_HIT_RATIO = 0.3  # 有效人脸采样占比低于此值则触发降级
+REFRAME_DETECT_TIMEOUT_SECONDS = 60  # 主体检测总耗时上限，超时降级为居中
+# 人脸检测模型（OpenCV DNN / YuNet onnx），打包时随桌面资源内置；缺失则降级居中
+REFRAME_FACE_MODEL_PATH = os.getenv(
+    "AUTOCLIP_FACE_MODEL_PATH",
+    str(Path(__file__).parent.parent / "models" / "face_detection_yunet.onnx")
+)
+REFRAME_VIDEO_CRF = 23           # 竖屏重编码质量
+REFRAME_VIDEO_PRESET = "veryfast"  # 竖屏重编码预设
+REFRAME_BLUR_SIGMA = 20          # 模糊兜底背景的 boxblur 强度
+
 # 确保输出目录存在
 for dir_path in [CLIPS_DIR, COLLECTIONS_DIR, METADATA_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
