@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Card, Button, Tooltip, Modal, message } from 'antd'
-import { PlayCircleOutlined, DownloadOutlined, ClockCircleOutlined, StarFilled, UploadOutlined } from '@ant-design/icons'
+import { Card, Button, Tooltip, Modal, message, Radio, Spin } from 'antd'
+import { PlayCircleOutlined, DownloadOutlined, ClockCircleOutlined, StarFilled, UploadOutlined, FontColorsOutlined } from '@ant-design/icons'
 import ReactPlayer from 'react-player'
 import { Clip } from '../store/useProjectStore'
+import { projectApi } from '../services/api'
 import BilibiliManager from './BilibiliManager'
 import EditableTitle from './EditableTitle'
 import './ClipCard.css'
@@ -25,6 +26,11 @@ const ClipCard: React.FC<ClipCardProps> = ({
   const [showPlayer, setShowPlayer] = useState(false)
   const [videoThumbnail, setVideoThumbnail] = useState<string | null>(null)
   const [showBilibiliManager, setShowBilibiliManager] = useState(false)
+  const [showSubtitleModal, setShowSubtitleModal] = useState(false)
+  const [subtitleTemplates, setSubtitleTemplates] = useState<Array<{ template_id: string, name: string }>>([])
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('')
+  const [loadingTemplates, setLoadingTemplates] = useState(false)
+  const [burning, setBurning] = useState(false)
   const playerRef = useRef<ReactPlayer>(null)
 
   // 生成视频缩略图
@@ -74,6 +80,43 @@ const ClipCard: React.FC<ClipCardProps> = ({
   const handleTitleUpdate = (newTitle: string) => {
     // 更新本地状态
     onClipUpdate?.(clip.id, { title: newTitle })
+  }
+
+  const openSubtitleModal = async () => {
+    setShowSubtitleModal(true)
+    if (subtitleTemplates.length > 0) return
+    setLoadingTemplates(true)
+    try {
+      const res = await projectApi.getSubtitleTemplates()
+      const templates = res?.templates || []
+      setSubtitleTemplates(templates)
+      const def = res?.default || (templates[0] && templates[0].template_id) || ''
+      setSelectedTemplate(def)
+    } catch (error) {
+      console.error('加载字幕模板失败:', error)
+      message.error('加载字幕模板失败')
+    } finally {
+      setLoadingTemplates(false)
+    }
+  }
+
+  const handleBurnSubtitle = async () => {
+    if (!selectedTemplate) {
+      message.warning('请选择一个字幕模板')
+      return
+    }
+    setBurning(true)
+    try {
+      await projectApi.burnSubtitle(clip.id, { template_id: selectedTemplate })
+      message.success('字幕烧录已开始，完成后可在片段中查看')
+      setShowSubtitleModal(false)
+    } catch (error: any) {
+      console.error('字幕烧录失败:', error)
+      const detail = error?.response?.data?.detail || '字幕烧录失败，可重试'
+      message.error(detail)
+    } finally {
+      setBurning(false)
+    }
   }
 
 
@@ -384,6 +427,23 @@ const ClipCard: React.FC<ClipCardProps> = ({
               <Button
                 type="text"
                 size="small"
+                icon={<FontColorsOutlined />}
+                onClick={openSubtitleModal}
+                style={{
+                  color: 'var(--ac-sub)',
+                  border: '1px solid var(--ac-line)',
+                  borderRadius: '999px',
+                  fontSize: '12px',
+                  height: '28px',
+                  padding: '0 14px',
+                  background: 'transparent'
+                }}
+              >
+                烧录字幕
+              </Button>
+              <Button
+                type="text"
+                size="small"
                 icon={<UploadOutlined />}
                 onClick={() => message.info('开发中，敬请期待', 3)}
                 style={{
@@ -500,6 +560,45 @@ const ClipCard: React.FC<ClipCardProps> = ({
           console.log('投稿成功')
         }}
       />
+
+      {/* 烧录字幕：模板选择弹窗 */}
+      <Modal
+        title="烧录字幕 · 选择样式模板"
+        open={showSubtitleModal}
+        onCancel={() => setShowSubtitleModal(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setShowSubtitleModal(false)}>
+            取消
+          </Button>,
+          <Button
+            key="burn"
+            type="primary"
+            loading={burning}
+            disabled={loadingTemplates || !selectedTemplate}
+            onClick={handleBurnSubtitle}
+          >
+            开始烧录
+          </Button>
+        ]}
+      >
+        {loadingTemplates ? (
+          <div style={{ textAlign: 'center', padding: '24px 0' }}>
+            <Spin tip="加载模板中..." />
+          </div>
+        ) : (
+          <Radio.Group
+            value={selectedTemplate}
+            onChange={(e) => setSelectedTemplate(e.target.value)}
+            style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}
+          >
+            {subtitleTemplates.map((tpl) => (
+              <Radio key={tpl.template_id} value={tpl.template_id}>
+                {tpl.name}
+              </Radio>
+            ))}
+          </Radio.Group>
+        )}
+      </Modal>
     </>
   )
 }
