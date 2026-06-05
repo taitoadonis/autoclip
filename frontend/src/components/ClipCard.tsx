@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Card, Button, Tooltip, Modal, message } from 'antd'
-import { PlayCircleOutlined, DownloadOutlined, ClockCircleOutlined, StarFilled, UploadOutlined } from '@ant-design/icons'
+import { Card, Button, Tooltip, Modal, message, Dropdown, Tag } from 'antd'
+import { PlayCircleOutlined, DownloadOutlined, ClockCircleOutlined, StarFilled, UploadOutlined, MobileOutlined, LoadingOutlined } from '@ant-design/icons'
 import ReactPlayer from 'react-player'
 import { Clip } from '../store/useProjectStore'
+import { projectApi } from '../services/api'
 import BilibiliManager from './BilibiliManager'
 import EditableTitle from './EditableTitle'
 import './ClipCard.css'
@@ -25,7 +26,12 @@ const ClipCard: React.FC<ClipCardProps> = ({
   const [showPlayer, setShowPlayer] = useState(false)
   const [videoThumbnail, setVideoThumbnail] = useState<string | null>(null)
   const [showBilibiliManager, setShowBilibiliManager] = useState(false)
+  const [reframing, setReframing] = useState(false)
   const playerRef = useRef<ReactPlayer>(null)
+
+  // 是否已存在竖屏变体（来自切片元数据）
+  const verticalVariants = ((clip as any)?.clip_metadata?.vertical_variants ?? []) as Array<any>
+  const [hasVertical, setHasVertical] = useState<boolean>(verticalVariants.length > 0)
 
   // 生成视频缩略图
   useEffect(() => {
@@ -64,6 +70,25 @@ const ClipCard: React.FC<ClipCardProps> = ({
     } catch (error) {
       console.error('下载失败:', error)
       message.error('下载失败')
+    }
+  }
+
+  const handleReframe = async (aspectRatio: '9:16' | '1:1') => {
+    if (reframing) return
+    setReframing(true)
+    try {
+      const res = await projectApi.reframeClip(clip.id, { aspect_ratio: aspectRatio })
+      if (res?.success) {
+        message.success(`已提交竖屏重构（${aspectRatio}），可在进度区查看；完成后将出现「竖屏」标记`)
+        setHasVertical(true)
+      } else {
+        message.error('竖屏重构提交失败，请重试')
+      }
+    } catch (error) {
+      console.error('竖屏重构失败:', error)
+      message.error('竖屏生成失败，可重试')
+    } finally {
+      setReframing(false)
     }
   }
 
@@ -381,6 +406,39 @@ const ClipCard: React.FC<ClipCardProps> = ({
               >
                 下载
               </Button>
+              <Dropdown
+                trigger={['click']}
+                disabled={reframing}
+                menu={{
+                  items: [
+                    { key: '9:16', label: '竖屏 9:16（抖音/视频号）' },
+                    { key: '1:1', label: '方形 1:1' },
+                  ],
+                  onClick: ({ key }) => handleReframe(key as '9:16' | '1:1'),
+                }}
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  icon={reframing ? <LoadingOutlined /> : <MobileOutlined />}
+                  style={{
+                    color: 'var(--ac-sub)',
+                    border: '1px solid var(--ac-line)',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    height: '28px',
+                    padding: '0 14px',
+                    background: 'transparent'
+                  }}
+                >
+                  生成竖屏
+                </Button>
+              </Dropdown>
+              {hasVertical && (
+                <Tag color="geekblue" style={{ borderRadius: '999px', margin: 0, fontSize: '11px' }}>
+                  竖屏
+                </Tag>
+              )}
               <Button
                 type="text"
                 size="small"

@@ -269,6 +269,209 @@ class VideoProcessor:
             return False
     
     @staticmethod
+    def get_video_dimensions(video_path: Path) -> Dict:
+        """
+        读取视频宽、高、时长、帧率。
+
+        Returns:
+            {'width': int, 'height': int, 'duration': float, 'fps': float}
+            失败返回空字典。
+        """
+        try:
+            ffprobe_bin = get_ffprobe_path()
+            cmd = [
+                ffprobe_bin,
+                '-v', 'quiet',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height,avg_frame_rate:format=duration',
+                '-print_format', 'json',
+                str(video_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if result.returncode != 0:
+                logger.error(f"读取视频尺寸失败: {result.stderr}")
+                return {}
+            info = json.loads(result.stdout)
+            stream = (info.get('streams') or [{}])[0]
+            width = int(stream.get('width', 0))
+            height = int(stream.get('height', 0))
+            # 解析帧率 "30000/1001"
+            fps = 0.0
+            rate = stream.get('avg_frame_rate', '0/1')
+            try:
+                num, den = rate.split('/')
+                den_f = float(den)
+                fps = float(num) / den_f if den_f else 0.0
+            except (ValueError, ZeroDivisionError):
+                fps = 0.0
+            duration = float(info.get('format', {}).get('duration', 0.0) or 0.0)
+            return {'width': width, 'height': height, 'duration': duration, 'fps': fps}
+        except Exception as e:
+            logger.error(f"读取视频尺寸异常: {str(e)}")
+            return {}
+
+    @staticmethod
+    def _target_dimensions(aspect_ratio: str) -> tuple:
+        """根据比例返回 (target_w, target_h)。"""
+        from ..core.shared_config import VERTICAL_WIDTH, VERTICAL_HEIGHT, SQUARE_SIZE
+        if aspect_ratio == "1:1":
+            return SQUARE_SIZE, SQUARE_SIZE
+        return VERTICAL_WIDTH, VERTICAL_HEIGHT
+
+    @staticmethod
+    def _build_track_crop_filter(segments, src_w: int, src_h: int,
+                                 target_w: int, target_h: int) -> str:
+        """
+        由分段裁剪窗口构造跟踪裁剪滤镜：
+        crop 宽度固定（=src_h*target_w/target_h，clamp 到 src_w），
+        x 用按时间分段的 if/between 表达式跟随主体中心，再 scale 到目标尺寸。
+        """
+        from .auto_reframe import compute_crop_x
+        crop_w = int(round(src_h * target_w / target_h))
+        crop_w = min(crop_w, src_w)
+
+        if not segments:
+            x_expr = str(int(round((src_w - crop_w) / 2)))
+        else:
+            # 构造嵌套 if(between(t,s,e), x, ...) 表达式
+            expr = str(compute_crop_x(segments[-1].x_ratio, src_w, src_h, target_w, target_h))
+            for seg in reversed(segments[:-1]):
+                x_px = compute_crop_x(seg.x_ratio, src_w, src_h, target_w, target_h)
+                expr = f"if(between(t,{seg.start:.3f},{seg.end:.3f}),{x_px},{expr})"
+            x_expr = expr
+
+        return (
+            f"crop={crop_w}:{src_h}:x='{x_expr}':y=0,"
+            f"scale={target_w}:{target_h}"
+        )
+
+    @staticmethod
+    def _build_blur_padding_filter(target_w: int, target_h: int) -> str:
+        """
+        模糊背景兜底滤镜：放大模糊原画铺底 + 居中叠加完整缩放原画。
+        """
+        from ..core.shared_config import REFRAME_BLUR_SIGMA
+        return (
+            f"[0:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},boxblur={REFRAME_BLUR_SIGMA}[bg];"
+            f"[0:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        )
+
+    @staticmethod
+    def _build_center_crop_filter(src_w: int, src_h: int,
+                                  target_w: int, target_h: int) -> str:
+        """居中裁剪兜底滤镜。"""
+        crop_w = int(round(src_h * target_w / target_h))
+        crop_w = min(crop_w, src_w)
+        x = int(round((src_w - crop_w) / 2))
+        return f"crop={crop_w}:{src_h}:x={x}:y=0,scale={target_w}:{target_h}"
+
+    @staticmethod
+    def reframe_to_vertical(input_video: Path, output_path: Path,
+                            aspect_ratio: str = "9:16",
+                            focus_strategy: str = "track",
+                            fallback_strategy: str = "center",
+                            focus_track: Optional[List] = None) -> Dict:
+        """
+        将横屏片段重构为竖屏（或 1:1）成品。
+
+        Args:
+            input_video: 源视频路径
+            output_path: 输出路径
+            aspect_ratio: "9:16" | "1:1"
+            focus_strategy: "track"（人脸跟踪）| "center"（居中）| "blur_padding"
+            fallback_strategy: track 失败时降级策略 "center" | "blur_padding"
+            focus_track: 预计算的 FocusPoint 列表（None 则内部计算）
+
+        Returns:
+            {'success': bool, 'fallback_used': bool, 'width': int, 'height': int,
+             'focus_strategy': str, 'error': Optional[str]}
+        """
+        from .auto_reframe import (
+            compute_focus_track, detect_success, smooth_centers, build_segments,
+        )
+        from ..core.shared_config import REFRAME_VIDEO_CRF, REFRAME_VIDEO_PRESET
+
+        result = {
+            'success': False, 'fallback_used': False,
+            'width': 0, 'height': 0,
+            'focus_strategy': focus_strategy, 'error': None,
+        }
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            dims = VideoProcessor.get_video_dimensions(input_video)
+            if not dims or dims.get('width', 0) <= 0 or dims.get('height', 0) <= 0:
+                result['error'] = "无法读取源视频尺寸"
+                logger.error(f"竖屏重构失败：{result['error']} ({input_video})")
+                return result
+
+            src_w, src_h = dims['width'], dims['height']
+            duration = dims.get('duration', 0.0)
+            target_w, target_h = VideoProcessor._target_dimensions(aspect_ratio)
+            result['width'], result['height'] = target_w, target_h
+
+            # 源已是竖屏（高 >= 宽）：仅 scale + pad，保比铺满
+            if src_h >= src_w:
+                vf = (f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                      f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2")
+                filter_args = ['-vf', vf]
+                result['focus_strategy'] = 'center'
+            else:
+                use_track = (focus_strategy == "track")
+                segments = None
+                if use_track:
+                    track = focus_track if focus_track is not None else \
+                        compute_focus_track(input_video, duration)
+                    if detect_success(track):
+                        smoothed = smooth_centers([p.x_ratio for p in track])
+                        segments = build_segments(track, smoothed, duration)
+                    else:
+                        result['fallback_used'] = True
+                        result['focus_strategy'] = fallback_strategy
+                        use_track = False
+
+                if use_track and segments is not None:
+                    vf = VideoProcessor._build_track_crop_filter(
+                        segments, src_w, src_h, target_w, target_h)
+                    filter_args = ['-vf', vf]
+                elif (result['fallback_used'] and fallback_strategy == "blur_padding") \
+                        or focus_strategy == "blur_padding":
+                    fc = VideoProcessor._build_blur_padding_filter(target_w, target_h)
+                    filter_args = ['-filter_complex', fc]
+                else:
+                    # 居中裁剪（显式 center 或 center 降级）
+                    vf = VideoProcessor._build_center_crop_filter(
+                        src_w, src_h, target_w, target_h)
+                    filter_args = ['-vf', vf]
+
+            ffmpeg_bin = get_ffmpeg_path()
+            cmd = [ffmpeg_bin, '-i', str(input_video)] + filter_args + [
+                '-c:v', 'libx264',
+                '-preset', REFRAME_VIDEO_PRESET,
+                '-crf', str(REFRAME_VIDEO_CRF),
+                '-c:a', 'aac', '-b:a', '128k',
+                '-movflags', '+faststart',
+                '-y', str(output_path)
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding='utf-8', errors='ignore')
+            if proc.returncode == 0 and output_path.exists():
+                result['success'] = True
+                logger.info(
+                    f"竖屏重构成功: {output_path} ({target_w}x{target_h}, "
+                    f"strategy={result['focus_strategy']}, fallback={result['fallback_used']})")
+            else:
+                result['error'] = proc.stderr
+                logger.error(
+                    f"竖屏重构 ffmpeg 失败 clip={input_video.name}: {proc.stderr}")
+            return result
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"竖屏重构异常 clip={input_video}: {e}")
+            return result
+
+    @staticmethod
     def extract_thumbnail(video_path: Path, output_path: Path, time_offset: int = 5) -> bool:
         """
         从视频中提取缩略图

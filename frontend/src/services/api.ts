@@ -370,6 +370,18 @@ export const projectApi = {
     return api.post(`/clips/${clipId}/generate-title`)
   },
 
+  // 竖屏重构（生成 9:16 / 1:1 竖屏成品，异步）
+  reframeClip: async (
+    clipId: string,
+    params?: { aspect_ratio?: '9:16' | '1:1', focus_strategy?: 'track' | 'center' | 'blur_padding', fallback_strategy?: 'center' | 'blur_padding' }
+  ): Promise<{ success: boolean, task_id: string, clip_id: string, project_id: string, aspect_ratio: string, message: string }> => {
+    return api.post(`/clips/${clipId}/reframe`, {
+      aspect_ratio: params?.aspect_ratio ?? '9:16',
+      focus_strategy: params?.focus_strategy ?? 'track',
+      fallback_strategy: params?.fallback_strategy ?? 'center',
+    })
+  },
+
   // 创建合集
   createCollection: (projectId: string, collectionData: { collection_title: string, collection_summary: string, clip_ids: string[] }): Promise<Collection> => {
     return api.post(`/collections/`, {

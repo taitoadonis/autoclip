@@ -22,6 +22,85 @@ def get_clip_service(db: Session = Depends(get_db)) -> ClipService:
     return ClipService(db)
 
 
+VALID_ASPECT_RATIOS = {"9:16", "1:1"}
+VALID_FOCUS_STRATEGIES = {"track", "center", "blur_padding"}
+VALID_FALLBACK_STRATEGIES = {"center", "blur_padding"}
+
+
+@router.post("/{clip_id}/reframe")
+async def reframe_clip(
+    clip_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    clip_service: ClipService = Depends(get_clip_service),
+):
+    """
+    将片段重构为竖屏（9:16）或 1:1 成品（异步）。
+
+    入参: { aspect_ratio: "9:16"|"1:1", focus_strategy: "track"|"center"|"blur_padding",
+            fallback_strategy: "center"|"blur_padding" }
+    立即返回任务标识；进度复用 /simple-progress/snapshot/{project_id} 轮询。
+    """
+    try:
+        aspect_ratio = (payload or {}).get("aspect_ratio", "9:16")
+        focus_strategy = (payload or {}).get("focus_strategy", "track")
+        fallback_strategy = (payload or {}).get("fallback_strategy", "center")
+
+        if aspect_ratio not in VALID_ASPECT_RATIOS:
+            raise HTTPException(status_code=400, detail=f"不支持的比例: {aspect_ratio}")
+        if focus_strategy not in VALID_FOCUS_STRATEGIES:
+            raise HTTPException(status_code=400, detail=f"不支持的焦点策略: {focus_strategy}")
+        if fallback_strategy not in VALID_FALLBACK_STRATEGIES:
+            raise HTTPException(status_code=400, detail=f"不支持的降级策略: {fallback_strategy}")
+
+        clip = clip_service.get(clip_id)
+        if not clip:
+            raise HTTPException(status_code=404, detail="切片不存在")
+
+        project_id = str(clip.project_id)
+        task_id = f"reframe_{clip_id}_{aspect_ratio.replace(':', 'x')}"
+
+        from .async_task_manager import task_manager
+        from ...services.simple_progress import emit_progress
+        from ...core.database import SessionLocal
+
+        async def _run():
+            import asyncio
+            emit_progress(project_id, "EXPORT", f"开始竖屏重构 {aspect_ratio}", subpercent=5)
+            # 在独立 DB 会话中执行（避免跨请求会话生命周期问题）
+            session = SessionLocal()
+            try:
+                svc = ClipService(session)
+                result = await asyncio.to_thread(
+                    svc.reframe_clip, clip_id, aspect_ratio,
+                    focus_strategy, fallback_strategy,
+                )
+                if result.get("success"):
+                    emit_progress(project_id, "DONE", "竖屏重构完成", subpercent=100)
+                else:
+                    emit_progress(project_id, "EXPORT",
+                                  f"竖屏重构失败: {result.get('error')}", subpercent=100)
+                return result
+            finally:
+                session.close()
+
+        await task_manager.create_safe_task(task_id, _run)
+
+        return {
+            "success": True,
+            "message": "竖屏重构任务已提交",
+            "task_id": task_id,
+            "clip_id": clip_id,
+            "project_id": project_id,
+            "aspect_ratio": aspect_ratio,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"提交竖屏重构任务失败: {e}")
+        raise HTTPException(status_code=500, detail=f"提交竖屏重构任务失败: {str(e)}")
+
+
 @router.patch("/{clip_id}/title", response_model=ClipResponse)
 async def update_clip_title(
     clip_id: str,

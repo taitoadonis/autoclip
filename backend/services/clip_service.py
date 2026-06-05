@@ -89,4 +89,107 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
         return ClipListResponse(
             items=clip_responses,
             pagination=pagination_response
-        ) 
+        )
+
+    def _resolve_clip_video_path(self, clip: Clip):
+        """解析片段源视频文件路径，复用合集生成端点的查找逻辑。"""
+        from pathlib import Path
+        from ..core.path_utils import get_project_directory
+
+        if clip.video_path and Path(clip.video_path).exists():
+            return Path(clip.video_path)
+
+        project_dir = get_project_directory(str(clip.project_id))
+        clips_dir = project_dir / "output" / "clips"
+        matches = list(clips_dir.glob(f"{clip.id}_*.mp4"))
+        if matches:
+            return matches[0]
+        for name in (f"clip_{clip.id}.mp4", f"{clip.id}.mp4"):
+            candidate = clips_dir / name
+            if candidate.exists():
+                return candidate
+        return None
+
+    def reframe_clip(
+        self,
+        clip_id: str,
+        aspect_ratio: str = "9:16",
+        focus_strategy: str = "track",
+        fallback_strategy: str = "center",
+    ) -> Dict[str, Any]:
+        """
+        将单个片段重构为竖屏（或 1:1）并把变体写回 clip_metadata。
+
+        幂等：若已存在相同 aspect_ratio 且文件仍在的变体，直接复用缓存。
+
+        Returns:
+            {'success': bool, 'cached': bool, 'variant': dict|None, 'error': str|None}
+        """
+        from datetime import datetime
+        from pathlib import Path
+        from ..utils.video_processor import VideoProcessor
+        from ..core.path_utils import get_project_directory
+
+        out = {'success': False, 'cached': False, 'variant': None, 'error': None}
+
+        clip = self.get(clip_id)
+        if not clip:
+            out['error'] = "切片不存在"
+            return out
+
+        metadata = dict(getattr(clip, 'clip_metadata', {}) or {})
+        variants = list(metadata.get('vertical_variants', []) or [])
+
+        # 缓存复用：相同比例且文件仍存在
+        for v in variants:
+            if v.get('aspect_ratio') == aspect_ratio and \
+                    v.get('video_path') and Path(v['video_path']).exists():
+                out.update({'success': True, 'cached': True, 'variant': v})
+                return out
+
+        source = self._resolve_clip_video_path(clip)
+        if source is None or not source.exists():
+            out['error'] = f"切片源视频文件不存在: {clip_id}"
+            return out
+
+        project_dir = get_project_directory(str(clip.project_id))
+        clips_dir = project_dir / "output" / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        suffix = aspect_ratio.replace(':', 'x')  # 9:16 -> 9x16
+        safe_title = VideoProcessor.sanitize_filename(str(clip.title) or f"clip_{clip_id}")
+        output_path = clips_dir / f"{clip_id}_{safe_title}_{suffix}.mp4"
+
+        res = VideoProcessor.reframe_to_vertical(
+            input_video=source,
+            output_path=output_path,
+            aspect_ratio=aspect_ratio,
+            focus_strategy=focus_strategy,
+            fallback_strategy=fallback_strategy,
+        )
+        if not res.get('success'):
+            out['error'] = res.get('error') or "竖屏重构失败"
+            return out
+
+        # 竖屏缩略图
+        thumb_path = clips_dir / f"{clip_id}_{safe_title}_{suffix}_thumb.jpg"
+        thumb_ok = VideoProcessor.extract_thumbnail(output_path, thumb_path, time_offset=1)
+
+        variant = {
+            'aspect_ratio': aspect_ratio,
+            'video_path': str(output_path),
+            'thumbnail_path': str(thumb_path) if thumb_ok else None,
+            'focus_strategy': res.get('focus_strategy', focus_strategy),
+            'fallback_used': bool(res.get('fallback_used', False)),
+            'width': res.get('width', 0),
+            'height': res.get('height', 0),
+            'created_at': datetime.now().isoformat(),
+        }
+        # 去重同比例旧记录后写入
+        variants = [v for v in variants if v.get('aspect_ratio') != aspect_ratio]
+        variants.append(variant)
+        metadata['vertical_variants'] = variants
+
+        self.update(clip_id, clip_metadata=metadata)
+        out.update({'success': True, 'cached': False, 'variant': variant})
+        return out
