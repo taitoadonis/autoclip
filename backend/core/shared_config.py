@@ -124,6 +124,112 @@ TARGET_TOPIC_DURATION_MINUTES = 5  # 话题目标时长（分钟）
 MIN_TOPICS_PER_CHUNK = 3  # 每个文本块最少话题数
 MAX_TOPICS_PER_CHUNK = 8  # 每个文本块最多话题数
 
+# ============================================================
+# 烧录字幕（Burned Subtitles）配置
+# ============================================================
+
+# 字幕安全区：字幕底边距占画布高度的百分比（底部安全区 ~12%）
+SUBTITLE_SAFE_MARGIN_PCT = 0.12
+# 整句字幕最大行数，超出按字符宽度换行
+SUBTITLE_MAX_LINES = 2
+# 每行最大字符数（中文整句限宽换行的近似阈值，按画布宽度估算）
+SUBTITLE_MAX_CHARS_PER_LINE = 18
+# 烧录重编码参数（烧字幕必须重编码，不能 -c:v copy）
+SUBTITLE_VIDEO_CRF = 23
+SUBTITLE_VIDEO_PRESET = "veryfast"
+SUBTITLE_AUDIO_BITRATE = "128k"
+
+# 内置中文字体目录解析：环境变量优先，回退到桌面打包资源目录与项目内 assets
+def _resolve_subtitle_fonts_dir() -> Path:
+    """返回内置中文字体所在目录（用于 ffmpeg fontsdir）。
+
+    优先顺序：
+    1) 环境变量 AUTOCLIP_SUBTITLE_FONTS_DIR
+    2) 桌面打包注入的资源目录（类比 ffmpeg 静态二进制注入）
+    3) 项目内 backend/assets/fonts
+    """
+    env_dir = os.getenv("AUTOCLIP_SUBTITLE_FONTS_DIR")
+    if env_dir and Path(env_dir).exists():
+        return Path(env_dir)
+    # 项目内置字体目录（随源码/打包资源分发）
+    return Path(__file__).parent.parent / "assets" / "fonts"
+
+SUBTITLE_FONTS_DIR = _resolve_subtitle_fonts_dir()
+
+# 内置中文字体文件路径（显式指定，保证脱离系统字体也能渲染中文）
+def _resolve_subtitle_font_path() -> Optional[Path]:
+    env_font = os.getenv("AUTOCLIP_SUBTITLE_FONT_PATH")
+    if env_font and Path(env_font).exists():
+        return Path(env_font)
+    # 在字体目录下按优先级查找常见开源中文字体文件名
+    candidates = [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansSC-Regular.otf",
+        "NotoSansSC-Regular.ttf",
+        "SourceHanSansSC-Regular.otf",
+        "SourceHanSansCN-Regular.otf",
+    ]
+    for name in candidates:
+        p = SUBTITLE_FONTS_DIR / name
+        if p.exists():
+            return p
+    return None
+
+SUBTITLE_FONT_PATH = _resolve_subtitle_font_path()
+
+# ASS 渲染使用的字体族名称（与内置字体匹配；若打包字体族名不同需同步调整）
+SUBTITLE_FONT_NAME = os.getenv("AUTOCLIP_SUBTITLE_FONT_NAME", "Noto Sans CJK SC")
+
+# 字幕样式模板（首版 3 个）。颜色为 ASS &HAABBGGRR 格式（AA=透明度，00=不透明）。
+# 字号 base_font_pct 按画布高度比例计算，保证横竖屏一致观感。
+SUBTITLE_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    # 模板1：经典白字 —— 白字 + 黑色描边，无底色，底部居中
+    "classic_white": {
+        "name": "经典白字",
+        "font_name": SUBTITLE_FONT_NAME,
+        "base_font_pct": 0.050,      # 字号占画布高度比例
+        "primary_colour": "&H00FFFFFF",   # 白色
+        "outline_colour": "&H00000000",   # 黑色描边
+        "back_colour": "&H00000000",
+        "bold": 1,
+        "border_style": 1,           # 1=描边+阴影
+        "outline": 2,                # 描边宽度
+        "shadow": 0,
+        "alignment": 2,              # 2=底部居中
+    },
+    # 模板2：醒目底色块 —— 白字 + 半透明黑底色块，底部居中加粗
+    "bold_box": {
+        "name": "醒目底色块",
+        "font_name": SUBTITLE_FONT_NAME,
+        "base_font_pct": 0.052,
+        "primary_colour": "&H00FFFFFF",   # 白字
+        "outline_colour": "&H00000000",
+        "back_colour": "&H80000000",      # 半透明黑底（AA=80）
+        "bold": 1,
+        "border_style": 3,           # 3=不透明/底色块盒子
+        "outline": 6,                # 盒子内边距
+        "shadow": 0,
+        "alignment": 2,
+    },
+    # 模板3：亮色强调 —— 亮黄主色字 + 黑描边 + 阴影，底部偏上加粗
+    "bright_accent": {
+        "name": "亮色强调",
+        "font_name": SUBTITLE_FONT_NAME,
+        "base_font_pct": 0.055,
+        "primary_colour": "&H0000F0FF",   # 亮黄（BGR: FF F0 00）
+        "outline_colour": "&H00000000",
+        "back_colour": "&H00000000",
+        "bold": 1,
+        "border_style": 1,
+        "outline": 3,
+        "shadow": 2,                 # 阴影
+        "alignment": 2,
+    },
+}
+
+# 默认模板
+SUBTITLE_DEFAULT_TEMPLATE = "classic_white"
+
 # 确保输出目录存在
 for dir_path in [CLIPS_DIR, COLLECTIONS_DIR, METADATA_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)

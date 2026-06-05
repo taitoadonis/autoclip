@@ -370,6 +370,16 @@ export const projectApi = {
     return api.post(`/clips/${clipId}/generate-title`)
   },
 
+  // 获取字幕样式模板列表
+  getSubtitleTemplates: async (): Promise<{ templates: Array<{ template_id: string, name: string }>, default: string | null }> => {
+    return api.get(`/clips/subtitle-templates`)
+  },
+
+  // 烧录字幕（异步任务）
+  burnSubtitle: async (clipId: string, params: { template_id: string, aspect_ratio?: string }): Promise<{ message: string, task_id: string, clip_id: string, project_id: string, template_id: string }> => {
+    return api.post(`/clips/${clipId}/burn-subtitle`, params)
+  },
+
   // 创建合集
   createCollection: (projectId: string, collectionData: { collection_title: string, collection_summary: string, clip_ids: string[] }): Promise<Collection> => {
     return api.post(`/collections/`, {

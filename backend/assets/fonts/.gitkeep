@@ -1,0 +1,13 @@
+# 内置中文字幕字体目录
+#
+# 放置开源中文字体文件（OFL 许可），供烧录字幕（ASS/libass）渲染中文使用。
+# subtitle 配置按以下文件名优先查找：
+#   NotoSansCJKsc-Regular.otf / NotoSansSC-Regular.otf / NotoSansSC-Regular.ttf
+#   SourceHanSansSC-Regular.otf / SourceHanSansCN-Regular.otf
+#
+# 也可用环境变量覆盖：
+#   AUTOCLIP_SUBTITLE_FONTS_DIR  指定字体目录
+#   AUTOCLIP_SUBTITLE_FONT_PATH  指定字体文件
+#   AUTOCLIP_SUBTITLE_FONT_NAME  指定 ASS 字体族名（默认 "Noto Sans CJK SC"）
+#
+# 注意：字体二进制不随源码提交（体积/许可），由桌面打包流程注入此目录。

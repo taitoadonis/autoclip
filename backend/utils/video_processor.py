@@ -309,7 +309,106 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"提取缩略图异常: {str(e)}")
             return False
-    
+
+    @staticmethod
+    def get_video_resolution(video_path: Path) -> Optional[tuple]:
+        """获取视频分辨率 (width, height)。失败返回 None。"""
+        try:
+            ffprobe_bin = get_ffprobe_path()
+            cmd = [
+                ffprobe_bin,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height',
+                '-of', 'json',
+                str(video_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if result.returncode != 0:
+                logger.error(f"获取视频分辨率失败: {result.stderr}")
+                return None
+            info = json.loads(result.stdout)
+            streams = info.get('streams') or []
+            if not streams:
+                return None
+            w = int(streams[0]['width'])
+            h = int(streams[0]['height'])
+            return (w, h)
+        except Exception as e:
+            logger.error(f"获取视频分辨率异常: {str(e)}")
+            return None
+
+    @staticmethod
+    def _escape_ass_filter_path(path: str) -> str:
+        """转义 ffmpeg 滤镜参数中的路径（处理 Windows 盘符冒号与反斜杠、单引号）。"""
+        # ffmpeg 滤镜中冒号与反斜杠需转义；统一使用正斜杠并转义冒号
+        p = str(path).replace('\\', '/')
+        p = p.replace(':', r'\:')
+        p = p.replace("'", r"\'")
+        return p
+
+    @staticmethod
+    def burn_subtitles(input_video: Path, output_path: Path,
+                       ass_path: Path, fonts_dir: Optional[Path] = None) -> bool:
+        """将 ASS 字幕硬烧录进视频（必须重编码，不能 -c:v copy）。
+
+        Args:
+            input_video: 输入视频路径
+            output_path: 输出带字幕视频路径
+            ass_path: ASS 字幕文件路径
+            fonts_dir: 内置字体目录（用于 libass fontsdir）
+
+        Returns:
+            是否成功
+        """
+        try:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 编码参数（从配置读取，带兜底）
+            try:
+                from ..core import shared_config
+                crf = getattr(shared_config, "SUBTITLE_VIDEO_CRF", 23)
+                preset = getattr(shared_config, "SUBTITLE_VIDEO_PRESET", "veryfast")
+                audio_bitrate = getattr(shared_config, "SUBTITLE_AUDIO_BITRATE", "128k")
+            except Exception:
+                crf, preset, audio_bitrate = 23, "veryfast", "128k"
+
+            # 构建 ass 滤镜参数
+            ass_arg = VideoProcessor._escape_ass_filter_path(str(ass_path))
+            vf = f"ass={ass_arg}"
+            if fonts_dir and Path(fonts_dir).exists():
+                fonts_arg = VideoProcessor._escape_ass_filter_path(str(fonts_dir))
+                vf = f"ass={ass_arg}:fontsdir={fonts_arg}"
+
+            ffmpeg_bin = get_ffmpeg_path()
+            cmd = [
+                ffmpeg_bin,
+                '-i', str(input_video),
+                '-vf', vf,
+                '-c:v', 'libx264',
+                '-preset', str(preset),
+                '-crf', str(crf),
+                '-c:a', 'aac',
+                '-b:a', str(audio_bitrate),
+                '-movflags', '+faststart',
+                '-y',
+                str(output_path)
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+
+            if result.returncode == 0 and output_path.exists():
+                logger.info(f"成功烧录字幕: {output_path}")
+                return True
+            else:
+                logger.error(f"烧录字幕失败 (ass={ass_path}): {result.stderr}")
+                return False
+
+        except Exception as e:
+            logger.error(f"烧录字幕异常: {str(e)}")
+            return False
+
     @staticmethod
     def get_video_info(video_path: Path) -> Dict:
         """

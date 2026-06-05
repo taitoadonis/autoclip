@@ -2,8 +2,10 @@
 切片API路由
 """
 
+import asyncio
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ...core.database import get_db
 from ...services.clip_service import ClipService
@@ -15,6 +17,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class BurnSubtitleRequest(BaseModel):
+    """烧录字幕请求体"""
+    template_id: str
+    aspect_ratio: Optional[str] = None
 
 
 def get_clip_service(db: Session = Depends(get_db)) -> ClipService:
@@ -66,6 +74,100 @@ async def update_clip_title(
     except Exception as e:
         logger.error(f"更新切片标题失败: {e}")
         raise HTTPException(status_code=500, detail=f"更新切片标题失败: {str(e)}")
+
+
+@router.get("/subtitle-templates", response_model=dict)
+async def list_subtitle_templates():
+    """列出可用的字幕样式模板。"""
+    from ...core import shared_config
+    templates = getattr(shared_config, "SUBTITLE_TEMPLATES", {})
+    default_template = getattr(shared_config, "SUBTITLE_DEFAULT_TEMPLATE", None)
+    items = [
+        {
+            "template_id": tid,
+            "name": cfg.get("name", tid),
+        }
+        for tid, cfg in templates.items()
+    ]
+    return {"templates": items, "default": default_template}
+
+
+async def _run_burn_subtitle_task(
+    clip_id: str,
+    project_id: str,
+    template_id: str,
+    aspect_ratio: Optional[str],
+):
+    """异步执行字幕烧录（在独立线程 + 独立 DB 会话中运行）。"""
+    from ...core.database import SessionLocal
+    from ...services.simple_progress import emit_progress
+
+    def _work():
+        db = SessionLocal()
+        try:
+            service = ClipService(db)
+            return service.burn_subtitle_clip(clip_id, template_id, aspect_ratio)
+        finally:
+            db.close()
+
+    try:
+        emit_progress(project_id, "EXPORT", f"开始烧录字幕（模板 {template_id}）", subpercent=10)
+        result = await asyncio.to_thread(_work)
+        status = result.get("status")
+        if status == "empty":
+            emit_progress(project_id, "EXPORT", "该片段无字幕，已跳过烧录", subpercent=100)
+        else:
+            emit_progress(project_id, "DONE", "字幕烧录完成", subpercent=100)
+        return result
+    except Exception as e:
+        logger.error(f"字幕烧录任务失败: clip_id={clip_id}, template_id={template_id}, 错误: {e}")
+        emit_progress(project_id, "EXPORT", f"字幕烧录失败: {e}", subpercent=0)
+        raise
+
+
+@router.post("/{clip_id}/burn-subtitle", response_model=dict)
+async def burn_subtitle(
+    clip_id: str,
+    request: BurnSubtitleRequest,
+    clip_service: ClipService = Depends(get_clip_service),
+):
+    """为片段烧录整句字幕（异步）。返回任务标识，进度经现有进度轮询查询。"""
+    from ...core import shared_config
+
+    templates = getattr(shared_config, "SUBTITLE_TEMPLATES", {})
+    if request.template_id not in templates:
+        raise HTTPException(status_code=400, detail=f"无效的字幕模板: {request.template_id}")
+
+    clip = clip_service.get(clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="切片不存在")
+
+    project_id = str(getattr(clip, "project_id", ""))
+
+    # 提前校验 SRT 是否存在，给出明确错误
+    from ...core.path_utils import get_projects_directory
+    srt_path = get_projects_directory() / project_id / "raw" / "input.srt"
+    if not srt_path.exists():
+        raise HTTPException(status_code=400, detail="项目字幕（SRT）不存在，请先生成字幕")
+
+    from .async_task_manager import task_manager
+    task_id = f"burn_subtitle_{clip_id}_{request.template_id}"
+    await task_manager.create_safe_task(
+        task_id,
+        _run_burn_subtitle_task,
+        clip_id,
+        project_id,
+        request.template_id,
+        request.aspect_ratio,
+    )
+
+    return {
+        "message": "字幕烧录任务已启动",
+        "task_id": task_id,
+        "clip_id": clip_id,
+        "project_id": project_id,
+        "template_id": request.template_id,
+    }
 
 
 @router.post("/{clip_id}/generate-title", response_model=dict)

@@ -315,3 +315,189 @@ class SubtitleProcessor:
             'segmentCount': segment_count,
             'averageWordsPerSegment': word_count / segment_count if segment_count > 0 else 0
         }
+
+    # ============================================================
+    # 烧录字幕：片段字幕提取与 ASS 生成
+    # ============================================================
+
+    def extract_clip_subtitles(self, srt_path: Path, start: float, end: float) -> List[Dict]:
+        """从项目 SRT 中提取某片段时间窗内的整句字幕，并归零对齐。
+
+        Args:
+            srt_path: 项目 SRT 文件路径
+            start: 片段起点（秒，相对原视频）
+            end: 片段终点（秒，相对原视频）
+
+        Returns:
+            片段级整句字幕列表，每项 {startTime, endTime, text}，
+            时间已减去片段起点并裁剪到 [0, duration]。无重叠时返回空列表。
+        """
+        srt_path = Path(srt_path)
+        if not srt_path.exists():
+            logger.error(f"SRT文件不存在: {srt_path}")
+            return []
+
+        if end <= start:
+            logger.warning(f"无效的片段时间窗: start={start}, end={end}")
+            return []
+
+        duration = end - start
+
+        try:
+            subs = pysrt.open(str(srt_path), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"解析SRT文件失败: {e}")
+            return []
+
+        clip_segments: List[Dict] = []
+        for sub in subs:
+            seg_start = self._srt_time_to_seconds(sub.start)
+            seg_end = self._srt_time_to_seconds(sub.end)
+
+            # 过滤：与片段时间窗有重叠的字幕段
+            if seg_end <= start or seg_start >= end:
+                continue
+
+            text = (sub.text or "").strip()
+            if not text:
+                continue
+
+            # 归零对齐 + 裁剪首尾溢出到 [0, duration]
+            aligned_start = max(0.0, seg_start - start)
+            aligned_end = min(duration, seg_end - start)
+
+            # 裁剪后若无有效时长则跳过
+            if aligned_end <= aligned_start:
+                continue
+
+            clip_segments.append({
+                'startTime': aligned_start,
+                'endTime': aligned_end,
+                'text': text,
+            })
+
+        logger.info(
+            f"提取片段字幕: 窗口[{start:.2f},{end:.2f}] 命中 {len(clip_segments)} 段"
+        )
+        return clip_segments
+
+    def to_ass(self, segments: List[Dict], template: Dict,
+               canvas_w: int, canvas_h: int) -> str:
+        """将片段整句字幕转换为 ASS 字幕字符串。
+
+        Args:
+            segments: extract_clip_subtitles 产出的整句字幕列表
+            template: shared_config.SUBTITLE_TEMPLATES 中的某个模板字典
+            canvas_w: 目标画布宽度（像素）
+            canvas_h: 目标画布高度（像素）
+
+        Returns:
+            完整 ASS 文件文本（可写入 .ass 供 libass 渲染）。
+        """
+        from ..core import shared_config
+
+        safe_margin_pct = getattr(shared_config, "SUBTITLE_SAFE_MARGIN_PCT", 0.12)
+        max_lines = getattr(shared_config, "SUBTITLE_MAX_LINES", 2)
+        max_chars = getattr(shared_config, "SUBTITLE_MAX_CHARS_PER_LINE", 18)
+
+        # 字号按画布高度比例计算，保证横竖屏一致观感
+        base_font_pct = template.get("base_font_pct", 0.05)
+        font_size = max(12, int(round(canvas_h * base_font_pct)))
+
+        # 底部安全区边距（像素），用于 ASS MarginV
+        margin_v = int(round(canvas_h * safe_margin_pct))
+        margin_h = int(round(canvas_w * 0.05))
+
+        font_name = template.get("font_name", "Noto Sans CJK SC")
+        primary = template.get("primary_colour", "&H00FFFFFF")
+        outline_c = template.get("outline_colour", "&H00000000")
+        back_c = template.get("back_colour", "&H00000000")
+        bold = int(template.get("bold", 1))
+        border_style = int(template.get("border_style", 1))
+        outline = template.get("outline", 2)
+        shadow = template.get("shadow", 0)
+        alignment = int(template.get("alignment", 2))
+
+        # ASS 头部 + 样式定义
+        header = (
+            "[Script Info]\n"
+            "ScriptType: v4.00+\n"
+            f"PlayResX: {canvas_w}\n"
+            f"PlayResY: {canvas_h}\n"
+            "WrapStyle: 0\n"
+            "ScaledBorderAndShadow: yes\n"
+            "\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,{font_name},{font_size},{primary},&H000000FF,"
+            f"{outline_c},{back_c},{bold},0,0,0,100,100,0,0,"
+            f"{border_style},{outline},{shadow},{alignment},"
+            f"{margin_h},{margin_h},{margin_v},1\n"
+            "\n"
+            "[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+            "MarginV, Effect, Text\n"
+        )
+
+        lines = [header]
+        for seg in segments:
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            wrapped = self._wrap_text(text, max_chars, max_lines)
+            ass_text = wrapped.replace("\n", "\\N")
+            start_ts = self._seconds_to_ass_time(seg["startTime"])
+            end_ts = self._seconds_to_ass_time(seg["endTime"])
+            lines.append(
+                f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{ass_text}\n"
+            )
+
+        return "".join(lines)
+
+    def _wrap_text(self, text: str, max_chars: int, max_lines: int) -> str:
+        """按最大字符数对整句限宽换行，最多 max_lines 行，溢出截断加省略号。"""
+        if max_chars <= 0:
+            return text
+        words = text.split()
+        # 中文整句通常无空格：退化为按字符切分
+        if len(words) <= 1:
+            chunks = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+        else:
+            chunks = []
+            current = ""
+            for w in words:
+                candidate = (current + " " + w).strip()
+                if len(candidate) > max_chars and current:
+                    chunks.append(current)
+                    current = w
+                else:
+                    current = candidate
+            if current:
+                chunks.append(current)
+
+        if len(chunks) > max_lines:
+            chunks = chunks[:max_lines]
+            # 末行溢出标记
+            last = chunks[-1]
+            if len(last) >= max_chars:
+                last = last[: max(0, max_chars - 1)] + "…"
+            else:
+                last = last + "…"
+            chunks[-1] = last
+
+        return "\n".join(chunks)
+
+    def _seconds_to_ass_time(self, seconds: float) -> str:
+        """将秒数转换为 ASS 时间格式 H:MM:SS.cc（厘秒）。"""
+        if seconds < 0:
+            seconds = 0.0
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        centiseconds = int(round((seconds - int(seconds)) * 100))
+        if centiseconds >= 100:
+            centiseconds = 99
+        return f"{hours:d}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"
