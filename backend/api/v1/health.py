@@ -6,6 +6,8 @@ from fastapi import APIRouter
 from datetime import datetime
 from typing import Dict, Any
 
+from backend.core import version
+
 router = APIRouter()
 
 
@@ -15,7 +17,7 @@ async def health_check() -> Dict[str, Any]:
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0"
+        "version": version.APP_VERSION
     }
 
 

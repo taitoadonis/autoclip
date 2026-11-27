@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
 
+from backend.core import version
 from backend.core.desktop_config import get_desktop_config, is_desktop_mode, DesktopConfig, save_desktop_config
 from backend.services.config_sync_service import config_sync_service
 from pathlib import Path
@@ -24,7 +25,9 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 class BasicSettings(BaseModel):
     """基础设置"""
     app_name: str = Field(default="AutoClip Desktop", description="应用名称")
-    app_version: str = Field(default="1.0.0", description="应用版本")
+    app_version: str = Field(
+        default_factory=lambda: version.APP_VERSION, description="应用版本"
+    )
     debug_mode: bool = Field(default=False, description="调试模式")
     auto_start: bool = Field(default=True, description="自动启动")
 

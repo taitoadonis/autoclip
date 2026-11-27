@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import path_utils
+from . import path_utils, version
 from .config import settings
 
 
@@ -156,7 +156,7 @@ class DesktopConfig:
 
     @property
     def app_version(self) -> str:
-        return "1.0.0"
+        return version.APP_VERSION
 
     @property
     def debug_mode(self) -> bool:
