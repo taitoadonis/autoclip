@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +25,18 @@ def version_app_factory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "log_file", str(tmp_path / "backend.log"))
 
-    from backend.app_factory import create_app
+    from backend import app_factory
 
-    return create_app
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(app_factory, "engine", engine)
+    try:
+        yield app_factory.create_app
+    finally:
+        engine.dispose()
 
 
 def test_backend_version_literal_has_one_source():
