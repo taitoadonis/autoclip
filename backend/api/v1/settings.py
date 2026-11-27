@@ -181,6 +181,7 @@ async def get_settings():
                 
                 # 验证并返回保存的设置
                 settings = DesktopSettings(**saved_settings)
+                settings.basic.app_version = version.APP_VERSION
                 return settings
             except Exception as e:
                 # 如果读取失败，回退到默认配置
